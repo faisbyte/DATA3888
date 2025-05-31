@@ -1,0 +1,217 @@
+---
+title: "stock0_group"
+format: html
+editor: visual
+code-fold: true
+---
+
+Applying GAM to all the datasetets
+
+For the below, the response is the realised volatility in the 20th bucket (last bucket).
+
+The predictors (covariates are): 
+- vol19: historical average volatility of buckets 1-19 
+- vol5: recent 5 bucket volatility (14-19) 
+- vol1: the immediate receding bucket volatility (bucket 19) 
+- ti(vol5, vol1): smooth interaction term between vol5 & vol1
+
+```{r message=FALSE, warning=FALSE}
+# put datasets in a list
+stock_list <- list(
+  stock_zero = stock_zero,
+  stock1      = stock1,
+  stock2      = stock2,
+  stock3      = stock3,
+  stock4      = stock4,
+  stock5      = stock5,
+  stock6      = stock6,
+  stock7      = stock7,
+  stock8      = stock8,
+  stock9      = stock9,
+  stock10     = stock10,
+  stock11     = stock11,
+  stock13     = stock13,
+  stock14     = stock14,
+  stock15     = stock15,
+  stock16     = stock16,
+  stock17     = stock17,
+  stock18     = stock18,
+  stock19     = stock19,
+  stock20     = stock20,
+  stock21     = stock21,
+  stock22     = stock22,
+  stock23     = stock23,
+  stock26     = stock26,
+  stock27     = stock27,
+  stock28     = stock28,
+  stock29     = stock29,
+  stock30     = stock30,
+  stock31     = stock31,
+  stock32     = stock32,
+  stock33     = stock33,
+  stock34     = stock34,
+  stock35     = stock35,
+  stock36     = stock36,
+  stock37     = stock37,
+  stock38     = stock38,
+  stock39     = stock39,
+  stock40     = stock40,
+  stock41     = stock41,
+  stock42     = stock42,
+  stock43     = stock43,
+  stock44     = stock44,
+  stock46     = stock46,
+  stock47     = stock47,
+  stock48     = stock48,
+  stock50     = stock50,
+  stock51     = stock51,
+  stock52     = stock52,
+  stock53     = stock53,
+  stock55     = stock55,
+  stock56     = stock56,
+  stock58     = stock58,
+  stock59     = stock59,
+  stock60     = stock60,
+  stock61     = stock61,
+  stock62     = stock62,
+  stock63     = stock63,
+  stock64     = stock64,
+  stock66     = stock66,
+  stock67     = stock67,
+  stock68     = stock68,
+  stock69     = stock69,
+  stock70     = stock70,
+  stock72     = stock72,
+  stock73     = stock73,
+  stock74     = stock74,
+  stock75     = stock75,
+  stock76     = stock76,
+  stock77     = stock77,
+  stock78     = stock78,
+  stock80     = stock80,
+  stock81     = stock81,
+  stock82     = stock82,
+  stock83     = stock83,
+  stock84     = stock84,
+  stock85     = stock85,
+  stock86     = stock86,
+  stock87     = stock87,
+  stock88     = stock88,
+  stock89     = stock89,
+  stock90     = stock90,
+  stock93     = stock93,
+  stock94     = stock94,
+  stock95     = stock95,
+  stock96     = stock96,
+  stock97     = stock97,
+  stock98     = stock98,
+  stock99     = stock99,
+  stock100    = stock100,
+  stock101    = stock101,
+  stock102    = stock102,
+  stock103    = stock103,
+  stock104    = stock104,
+  stock105    = stock105,
+  stock107    = stock107,
+  stock108    = stock108,
+  stock109    = stock109,
+  stock110    = stock110,
+  stock111    = stock111,
+  stock112    = stock112,
+  stock113    = stock113,
+  stock114    = stock114,
+  stock115    = stock115,
+  stock116    = stock116,
+  stock118    = stock118,
+  stock119    = stock119,
+  stock120    = stock120,
+  stock122    = stock122,
+  stock123    = stock123,
+  stock124    = stock124,
+  stock125    = stock125,
+  stock126    = stock126
+)
+
+
+comp_vol <- function(x) sqrt(sum(x^2))
+
+# loop over datasets
+for (nm in names(stock_list)) {
+  cat("==== Results for", nm, "====\n")
+  
+  # computing WAP and bid ask spreads
+  stk <- stock_list[[nm]] %>%
+    mutate(
+      WAP          = (bid_price1 * ask_size1 + ask_price1 * bid_size1) / (bid_size1 + ask_size1),
+      BidAskSpread = ask_price1 / bid_price1 - 1
+    )
+  
+  # 30 second buckets
+  time_IDs <- unique(stk$time_id)[1:500]
+  log_r    <- vector("list", length(time_IDs))
+  for (i in seq_along(time_IDs)) {
+    tmp <- stk %>% 
+      filter(time_id == time_IDs[i]) %>% 
+      arrange(seconds_in_bucket)
+    lr_df <- data.frame(
+      time       = tmp$seconds_in_bucket[-1],
+      log_return = log(tmp$WAP[-1] / tmp$WAP[-nrow(tmp)])
+    )
+    # fill missing
+    full_t  <- 1:600
+    miss    <- setdiff(full_t, lr_df$time)
+    if (length(miss)) lr_df <- bind_rows(lr_df, data.frame(time = miss, log_return = 0))
+    
+    log_r[[i]] <- lr_df %>%
+      arrange(time) %>%
+      mutate(time_bucket = ceiling(time / 30))
+  }
+  
+  # aggregate to bucket volatility
+  vol <- lapply(log_r, function(df) {
+    df %>%
+      group_by(time_bucket) %>%
+      summarise(volatility = comp_vol(log_return), .groups = "drop")
+  })
+  
+  # build feature frame
+  df.simple <- map2_df(vol, time_IDs, ~{
+    v <- .x$volatility
+    tibble(
+      time_id  = .y,
+      realised = v[20],
+      vol19    = mean(v[1:19]),
+      vol5     = mean(v[14:19]),
+      vol1     = v[19]
+    )
+  })
+  
+  # train/test split
+  set.seed(2025)
+  n         <- nrow(df.simple)
+  train_idx <- sample(n, size = 0.8 * n)
+  train     <- df.simple[train_idx, ]
+  test      <- df.simple[-train_idx, ]
+  
+  gm <- gam(
+    realised ~ s(vol19, k=10) + s(vol5, k=8) + s(vol1, k=5) + ti(vol5, vol1),
+    data   = train,
+    method = "REML"
+  )
+  print(summary(gm))
+  
+  
+  
+  # compute test R²
+  preds <- predict(gm, newdata = test)
+  rss   <- sum((test$realised - preds)^2)
+  tss   <- sum((test$realised - mean(train$realised))^2)
+  cat("Test-set R² =", round(1 - rss/tss, 3), "\n")
+  
+  #compute median QLIKE
+  actual    <- sapply(setdiff(seq_along(vol), train_idx),
+                      function(i) vol[[i]]$volatility[20])
+  qlike_pt  <- actual / preds - log(actual / preds) - 1
+  cat("Median QLIKE =", round(median(qlike_pt, na.rm = TRUE), 4), "\n\n")
+}
+```
