@@ -41,4 +41,6 @@ We have used all the datasets under the `individual_book_train` folder. In the f
 
 to your filepath of the datasets. There are 10 such occurences of `YOUR_PATH_TO/individual_book_train` which need to be changed in lines 515, 537, 556, 591, 608, 619, 801, 973, 1153 & 1468 of `shinyapp.R`. 
 
-Now, save use `Ctrl + S` or `CMD + S` and run the file.
+Now, save using `Ctrl + S` or `CMD + S` and run the file.
+
+Detailed instructions on each section of the ShinyApp are in the **Instructions** tab.
