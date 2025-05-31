@@ -1,0 +1,271 @@
+---
+title: "Restructuring Data"
+format: html
+editor: visual
+---
+## Load packages
+```{r}
+library(ggplot2)
+library(dplyr)
+library(rugarch)
+library(tidyverse)
+library(scales)
+library(lightgbm)
+library(data.table)
+library(MASS)
+```
+## Compute WAP+BAS
+```{r}
+#------ Read data, compute WAP/BAS -------#
+stock1 <- read.csv("~/Desktop/Education/2025/DATA3888/Optiver/individual_book_train/stock_6.csv")
+
+stock1$WAP <- (stock1$bid_price1 * stock1$ask_size1 + stock1$ask_price1 * stock1$bid_size1) / (stock1$bid_size1 + stock1$ask_size1)
+
+stock1$BidAskSpread <- (stock1$ask_price1 / stock1$bid_price1) - 1
+
+head(stock1)
+```
+
+## Log returns
+```{r}
+#-------- Compute log returns for each second of each time ID --------#
+log_r1 <- list()
+time_IDs <- unique(stock1[, 1])[1:500]
+for (i in 1 : length(time_IDs)) {
+  sec <- stock1 %>% filter(time_id == time_IDs[i]) %>% pull(seconds_in_bucket)
+  price <- stock1 %>% filter(time_id == time_IDs[i]) %>% pull(WAP)
+  log_r <- log(price[-1] / price[1:(length(price) - 1)])
+  log_r1[[i]] <- data.frame(time = sec[-1], log_return = log_r)
+  time.no.change <- (1:600)[!(1:600 %in% log_r1[[i]]$time)]
+  if (length(time.no.change) > 0) {
+    new.df <- data.frame(time = time.no.change, log_return = 0)
+    log_r1[[i]] <- rbind(log_r1[[i]], new.df)
+    log_r1[[i]] <- log_r1[[i]][order(log_r1[[i]]$time), ]
+  }
+}
+
+```
+
+## Create time buckets
+```{r}
+#------ Create 30 second time buckets and compute volatility and other stats -------#
+
+comp_vol <- function(x) {
+  return(sqrt(sum(x ^ 2)))
+}
+
+vol <- list()
+for (i in 1 : length(log_r1)) {
+  log_r1[[i]] <- log_r1[[i]] %>% mutate(time_bucket = ceiling(time / 30))
+  vol[[i]] <- aggregate(log_return ~ time_bucket, data = log_r1[[i]], FUN = comp_vol)
+  colnames(vol[[i]]) <- c('time_bucket', 'volatility')
+}
+
+
+
+
+
+```
+
+## Restructure the data
+```{r}
+#------ Create df with a row for the first 500 time id -----#
+n   <- length(vol)
+df.simple <- data.frame(
+  realised = rep(NA_real_, n),
+  matrix(NA_real_, nrow = n, ncol = 19,
+         dimnames = list(NULL, paste0("vol", 1:19)))
+)
+
+for (i in 1:length(vol)) {
+  df.simple$realised[i] <- vol[[i]]$volatility[20]
+
+  for (k in 1:19) {
+    df.simple[i, paste0("vol", k)] <-
+      mean(vol[[i]]$volatility[(20 - k):19])
+  }
+}
+
+head(df.simple)
+
+
+vol19 <- rep(NA, length(vol))
+vol5 <- rep(NA, length(vol))
+vol1 <- rep(NA, length(vol))
+realised<- rep(NA, length(vol))
+
+df.simple1 <- data.frame(realised, vol19, vol5, vol1)
+
+for (i in 1: length(vol)) {
+  realised <- vol[[i]]$volatility[20]
+  vol19 <- mean(vol[[i]]$volatility[1:19])
+  vol5 <- mean(vol[[i]]$volatility[15:19])
+  vol1 <- vol[[i]]$volatility[19]
+  
+  df.simple1$realised[i] <- realised
+  df.simple1$vol19[i] <- vol19
+  df.simple1$vol5[i] <- vol5
+  df.simple1$vol1[i] <- vol1
+  
+  
+}
+
+head(df.simple1)
+
+
+
+
+```
+
+## Train model
+```{r}
+set.seed(3888)
+
+
+#------ Set train and test indexes -------#
+train_indices <- sample(1:nrow(df.simple), size = 0.8 * nrow(df.simple))
+train_data <- df.simple[train_indices, ]
+test_data <- df.simple[-train_indices, ]
+
+
+
+#------ Train the full model -------#
+full.formula <- as.formula(
+  paste("realised ~", paste(paste0("vol", 1:19), collapse = " + "))
+)
+full.model <- lm(full.formula, data = train_data)
+
+step.model <- stepAIC(full.model,
+                   direction = "both",
+                   trace     = TRUE,
+                   k = log(nrow(train_data)))
+
+
+original.model <- lm(realised ~ vol19 + vol5 + vol1, train_data)
+summary(step.model)
+predictions1 <- predict(original.model, newdata = test_data)
+predictions <- predict(full.model, newdata = test_data)
+```
+
+
+## RMSE + R squared
+```{r}
+#----- Evaluate model with R squared and RMSE -----#
+actuals <- test_data$realised
+preds   <- predictions
+
+# residual‐sum‐of‐squares and total‐sum‐of‐squares
+SSE <- sum((actuals - preds)^2)
+SST <- sum((actuals - mean(actuals))^2)
+
+# R^2 on the test set
+R2.simple.reg <- 1 - SSE/SST
+R2.simple.reg
+
+# compute RMSE
+RMSE.simple.reg <- sqrt( mean( (actuals - preds)^2 ) )
+RMSE.simple.reg
+```
+
+
+## Stepwise QLIKE plot
+```{r}
+#----- Evaluate model with QLIKE (filtered and consistent median) -----
+
+# Compute raw QLIKE values
+qlike_vals <- (actuals / preds) - log(actuals / preds) - 1
+
+# Keep only finite, positive cases
+ok <- is.finite(qlike_vals) & (preds > 0) & (actuals > 0)
+qlike_vals <- qlike_vals[ok]
+
+# Compute median once
+med_qlike <- median(qlike_vals)
+
+# Put into a clean data.frame for plotting
+qlike_df <- data.frame(QLIKE = qlike_vals)
+
+# Plot boxplot with matching median line
+ggplot(qlike_df, aes(y = QLIKE)) +
+  geom_boxplot() +
+  coord_flip() +
+  annotate(
+    "text",
+    x     = 0.42,
+    y     = med_qlike,
+    label = paste0("Median = ", round(med_qlike, 5)),
+    vjust = -0.5,
+    colour = "red"
+  ) +
+  labs(
+    y     = "QLIKE",
+    title = "Boxplot of QLIKE for HAR-RV Model"
+  ) +
+  scale_y_continuous(
+    limits = c(0, quantile(qlike_vals, 0.95))
+  ) +
+  theme_minimal() +
+    theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+  )
+
+
+```
+<<<<<<< HEAD
+
+Shiny app
+- User picks a stock (number 1-127)
+- The app then knows which model is best for this stock
+- Text boxes appear according to the models features for input
+- User inputs the values of the features
+- A volatility prediction is returned
+
+
+## Original QLIKE plot
+```{r}
+#----- Evaluate model with QLIKE (filtered and consistent median) -----
+preds <- predictions1
+# Compute raw QLIKE values
+qlike_vals <- (actuals / preds) - log(actuals / preds) - 1
+
+# Keep only finite, positive cases
+ok <- is.finite(qlike_vals) & (preds > 0) & (actuals > 0)
+qlike_vals <- qlike_vals[ok]
+
+# Compute median once
+med_qlike <- median(qlike_vals)
+
+# Put into a clean data.frame for plotting
+qlike_df <- data.frame(QLIKE = qlike_vals)
+
+# Plot boxplot with matching median line
+ggplot(qlike_df, aes(y = QLIKE)) +
+  geom_boxplot() +
+  coord_flip() +
+  annotate(
+    "text",
+    x     = 0.42,
+    y     = med_qlike,
+    label = paste0("Median = ", round(med_qlike, 5)),
+    vjust = -0.5,
+    colour = "red"
+  ) +
+  labs(
+    y     = "QLIKE",
+    title = "Boxplot of QLIKE for HAR-RV Model"
+  ) +
+  scale_y_continuous(
+    limits = c(0, quantile(qlike_vals, 0.95))
+  ) +
+  theme_minimal() +
+    theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+  )
+
+
+```
+
+=======
+>>>>>>> 87d2172 (merge issue)
