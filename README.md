@@ -36,6 +36,9 @@ install.packages(c(
 ```
 
 We have used all the datasets under the `individual_book_train` folder. In the file `shinyapp.R`, please replace all occurences of:
-`YOUR_PATH_TO/individual_book_train` to your filepath of the datasets. There are 10 such occurences of `YOUR_PATH_TO/individual_book_train` which need to be changed in lines 515, 537, 556, 591, 608, 619, 801, 973, 1153 & 1468 of `shinyapp.R`. 
+
+`YOUR_PATH_TO/individual_book_train`
+
+to your filepath of the datasets. There are 10 such occurences of `YOUR_PATH_TO/individual_book_train` which need to be changed in lines 515, 537, 556, 591, 608, 619, 801, 973, 1153 & 1468 of `shinyapp.R`. 
 
 Now, save use `Ctrl + S` or `CMD + S` and run the file.
