@@ -1,0 +1,253 @@
+---
+title: "LightGBM"
+format: html
+editor: visual
+---
+
+## Convert csv to parquet
+
+```{r}
+csv_to_parquet = function(csv_folder, parquet_folder) {
+  if (!dir.exists(parquet_folder)) dir.create(parquet_folder)
+  csv_files = list.files(csv_folder, pattern = "\\.csv$", full.names = TRUE)
+
+  for (csv_file in csv_files) {
+    df_csv = read.csv(csv_file)
+    file_name = tools::file_path_sans_ext(basename(csv_file))
+    parquet_path = file.path(parquet_folder, paste0(file_name, ".parquet"))
+    write_parquet(df_csv, parquet_path)
+  }
+
+  cat("Conversion complete. Parquet files saved to:", parquet_folder, "\n")
+}
+
+```
+
+```{r}
+csv_dir = "/Users/zoelee/Desktop/USYD 2025/DATA3888/Project/individual_book_train"
+parquet_dir = "/Users/zoelee/Desktop/USYD 2025/DATA3888/Project/individual_book_train_parquet"
+
+csv_to_parquet(csv_dir, parquet_dir)
+```
+
+```{r}
+## Load Required Libraries
+library(arrow)
+library(dplyr)
+library(lightgbm)
+library(ggplot2)
+library(tibble)
+library(readr)
+```
+
+## WAP and BAS
+
+```{r}
+wap_bas = function(stock) {
+  stock$WAP = (stock$bid_price1 * stock$ask_size1 + stock$ask_price1 * stock$bid_size1) /
+               (stock$bid_size1 + stock$ask_size1)
+  stock$BidAskSpread = (stock$ask_price1 / stock$bid_price1) - 1
+  return(stock)
+}
+```
+
+## Compute Log Returns
+
+```{r}
+log_returns = function(stock, max_time_ids = 500) {
+  log_r_list = list()
+  time_IDs = unique(stock$time_id)[1:max_time_ids]
+  
+  for (i in seq_along(time_IDs)) {
+    sec = stock |>  filter(time_id == time_IDs[i]) |>  pull(seconds_in_bucket)
+    price = stock |>  filter(time_id == time_IDs[i]) |>  pull(WAP)
+    
+    log_r = log(price[-1] / price[1:(length(price) - 1)])
+    log_r_list[[i]] = data.frame(time = sec[-1], log_return = log_r)
+    missing_time = setdiff(1:600, log_r_list[[i]]$time)
+    
+    if (length(missing_time) > 0) {
+      fill = data.frame(time = missing_time, log_return = 0)
+      log_r_list[[i]] = rbind(log_r_list[[i]], fill)
+      log_r_list[[i]] = log_r_list[[i]][order(log_r_list[[i]]$time), ]
+    }
+  }
+  return(log_r_list)
+}
+```
+
+## Compute Volatility
+
+```{r}
+compute_volatility = function(log_r_list) {
+  vol_list = list()
+  comp_vol = function(x) sqrt(sum(x^2))
+  for (i in seq_along(log_r_list)) {
+    temp = log_r_list[[i]] |>  mutate(time_bucket = ceiling(time / 30))
+    vol_df = aggregate(log_return ~ time_bucket, data = temp, FUN = comp_vol)
+    colnames(vol_df) = c('time_bucket', 'volatility')
+    vol_list[[i]] = vol_df
+  }
+  return(vol_list)
+}
+
+## Feature Engineering
+simple_df = function(stock, vol_list) {
+  n = length(vol_list)
+  df = data.frame(realised = rep(NA, n), wap_mean = rep(NA, n), bas_mean = rep(NA, n))
+  
+  for (j in 1:19) {
+    df[[paste0("vol", j)]] = rep(NA, n)
+  }
+  time_IDs = unique(stock$time_id)[1:n]
+  
+  for (i in 1:n) {
+    vol_vals = vol_list[[i]]$volatility
+    if (length(vol_vals) < 20) next
+
+    df$realised[i] = vol_vals[20]
+    
+    for (j in 1:19) {
+      if (j == 1) {
+        df[i, paste0("vol", j)] = vol_vals[19]
+      } else {
+        df[i, paste0("vol", j)] <- mean(vol_vals[(20 - j):(19)])
+      }
+    }
+    
+    stock_temp = stock |>  filter(time_id == time_IDs[i])
+    df$wap_mean[i] = mean(stock_temp$WAP, na.rm = TRUE)
+    df$bas_mean[i] = mean(stock_temp$BidAskSpread, na.rm = TRUE)
+  }
+  return(na.omit(df))
+}
+```
+
+## Volatility Prediction Function
+
+```{r}
+volatility_prediction = function(stock_path, max_features = 3, alpha = 0.5) {
+  
+  stock = read_parquet(stock_path) |>  wap_bas()
+  log_r_list = log_returns(stock)
+  vol_list = compute_volatility(log_r_list)
+  df = simple_df(stock, vol_list)
+  
+  set.seed(3888)
+  train_idx = sample(1:nrow(df), 0.8 * nrow(df))
+  
+  train_df = df[train_idx, ]
+  test_df = df[-train_idx, ]
+  
+  x_train = train_df[, setdiff(names(train_df), "realised")]
+  y_train = train_df$realised
+  
+  x_test = test_df[, setdiff(names(test_df), "realised")]
+  y_test = test_df$realised
+
+  model1 = lgb.train(
+    params = list(objective = "regression", metric = "rmse", verbose = -1),
+    data = lgb.Dataset(data = as.matrix(x_train), label = y_train),
+    nrounds = 30
+  )
+  
+  shap = predict(model1, data.matrix(x_train), type = 'contrib')
+  shap_df = as.data.frame(shap[, -ncol(shap), drop = FALSE])
+  colnames(shap_df) = colnames(x_train)
+  shap_mean = colMeans(abs(shap_df))
+  shap_ordered = sort(shap_mean, decreasing = TRUE)
+  top_features = names(shap_ordered)[1:min(length(shap_ordered), max_features)]
+
+  x_train_sel = x_train[, top_features, drop = FALSE]
+
+  model2 = lgb.train(
+    params = list(objective = "regression", metric = "rmse", verbose = -1),
+    data = lgb.Dataset(data = data.matrix(x_train_sel), label = y_train),
+    nrounds = 50
+  )
+
+  valid_features = intersect(top_features, colnames(x_test))
+
+  pred = predict(model2, as.matrix(x_test[, valid_features, drop = FALSE]))
+  valid_idx = which(pred > 0 & y_test > 0 & is.finite(pred) & is.finite(y_test))
+  pred = pred[valid_idx]
+  y_test = y_test[valid_idx]
+
+  qlike = (y_test / pred) - log(y_test / pred) - 1
+  median_qlike = median(qlike, na.rm = TRUE)
+  
+  ss_total = sum((y_test - mean(y_test))^2)
+  ss_resid = sum((y_test - pred)^2)
+  r_squared = 1 - (ss_resid / ss_total)
+
+
+  return(list(model = model2,
+              top_features = top_features,
+              r_squared = r_squared,
+              median_qlike = median_qlike))
+}
+```
+
+## Run Over All Stocks
+
+```{r}
+run_stock = function(folder_path, max_features = 3) {
+  files = list.files(folder_path, pattern = "\\.parquet$", full.names = TRUE)
+  
+  # Extract numeric stock index from filename
+  stock_nums = as.integer(gsub(".*stock_(\\d+)\\.parquet$", "\\1", files))
+  
+  # Sort files by numeric stock index
+  files = files[order(stock_nums)]
+  results = list()
+  summary = tibble(Stock = character(), Features = character(), R2 = numeric(), Median_QLIKE = numeric())
+  
+  for (i in seq_along(files)) {
+    
+    cat("\n=====================\n")
+    cat("Running Stock", i-1, "\n")
+    cat("=====================\n")
+    
+    result = volatility_prediction(files[[i]], max_features)
+    
+    if (!is.null(result)) {
+      stock_name = tools::file_path_sans_ext(basename(files[[i]]))
+      results[[stock_name]] = result
+      
+      summary = add_row(summary,
+        Stock = stock_name,
+        Features = paste(result$top_features, collapse = ", "),
+        R2 = result$r_squared,
+        Median_QLIKE = result$median_qlike,
+      )
+      cat("Top Features Selected:", paste(result$top_features, collapse = ", "), "\n")
+      cat("R-squared:", round(result$r_squared, 5), "\n")
+      cat("Median QLIKE:", round(result$median_qlike, 5), "\n\n")
+    }
+  }
+  return(list(results = results, summary = summary))
+}
+
+results = run_stock(
+  "/Users/zoelee/Desktop/USYD 2025/DATA3888/Project/individual_book_train_parquet",
+  max_features = 3
+  )
+
+write_csv(results$summary, "LightGBM Performance Evaluation.csv")
+```
+
+# S-Score
+
+```{r}
+df = read_csv("LightGBM Performance Evaluation.csv", show_col_types = FALSE)
+
+alpha = 0.5
+df$A_QLIKE = 1 / (1 + df$Median_QLIKE)
+df$S_0.5 = alpha * df$R2 + (1 - alpha) * df$A_QLIKE
+
+output_df = df[, c("Stock", "S_0.5")]
+write_csv(output_df, "LightGBM_S_Score.csv")
+
+df1 = read_csv("LightGBM_S_Score.csv", show_col_types = FALSE)
+
+```
