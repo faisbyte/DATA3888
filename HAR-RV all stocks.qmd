@@ -1,0 +1,188 @@
+---
+title: "HAR-RV All Stocks"
+format: html
+editor: source
+---
+
+
+```{r}
+set.seed(3888)
+
+csv_directory <- "~/Desktop/Education/2025/DATA3888/Optiver/individual_book_train"
+
+# List all CSV files in the directory
+csv_files <- list.files(path = csv_directory, 
+                        pattern = "stock_\\d+\\.csv", 
+                        full.names = TRUE)
+
+# 1. pull out the numbers from each basename
+nums <- as.integer(str_extract(basename(csv_files), "\\d+"))
+
+# 2. order by those numbers
+csv_files_ordered <- csv_files[order(nums)]
+
+fnames <- basename(csv_files_ordered)
+
+# 2. remove the “.csv” suffix
+stock_ids <- sub("\\.csv$", "", fnames)
+
+
+results <- data.frame()
+
+i = 0
+
+original_models <- list()
+
+stepwise_models <- list()
+
+for (i in 1: length(csv_files_ordered)) {
+  stock <- read.csv(csv_files_ordered[i])
+  
+  stock$WAP <- (stock$bid_price1 * stock$ask_size1 + stock$ask_price1 * stock$bid_size1) / (stock$bid_size1 + stock$ask_size1)
+  
+  stock$BidAskSpread <- (stock$ask_price1 / stock$bid_price1) - 1
+  
+  #-------- Compute log returns for each second of each time ID --------#
+  log_r1 <- list()
+  time_IDs <- unique(stock1[, 1])[1:500]
+  for (j in 1 : length(time_IDs)) {
+    sec <- stock %>% filter(time_id == time_IDs[j]) %>% pull(seconds_in_bucket)
+    price <- stock %>% filter(time_id == time_IDs[j]) %>% pull(WAP)
+    log_r <- log(price[-1] / price[1:(length(price) - 1)])
+    log_r1[[j]] <- data.frame(time = sec[-1], log_return = log_r)
+    time.no.change <- (1:600)[!(1:600 %in% log_r1[[j]]$time)]
+    if (length(time.no.change) > 0) {
+      new.df <- data.frame(time = time.no.change, log_return = 0)
+      log_r1[[j]] <- rbind(log_r1[[j]], new.df)
+      log_r1[[j]] <- log_r1[[j]][order(log_r1[[j]]$time), ]
+    }
+  }
+  
+  #------ Create 30 second time buckets and compute volatility and other stats -------#
+  comp_vol <- function(x) {
+    return(sqrt(sum(x ^ 2)))
+  }
+  
+  vol <- list()
+  for (k in 1 : length(log_r1)) {
+    log_r1[[k]] <- log_r1[[k]] %>% mutate(time_bucket = ceiling(time / 30))
+    vol[[k]] <- aggregate(log_return ~ time_bucket, data = log_r1[[k]], FUN = comp_vol)
+    colnames(vol[[k]]) <- c('time_bucket', 'volatility')
+  }
+  
+  n   <- length(vol)
+  df.simple <- data.frame(
+    realised = rep(NA_real_, n),
+    matrix(NA_real_, nrow = n, ncol = 19,
+           dimnames = list(NULL, paste0("vol", 1:19)))
+  )
+  
+  for (l in 1:length(vol)) {
+    df.simple$realised[l] <- vol[[l]]$volatility[20]
+  
+    for (m in 1:19) {
+      df.simple[l, paste0("vol", m)] <-
+        mean(vol[[l]]$volatility[(20 - m):19])
+    }
+  }
+
+
+  #------ Set train and test indexes -------#
+  train_indices <- sample(1:nrow(df.simple), size = 0.8 * nrow(df.simple))
+  train_data <- df.simple[train_indices, ]
+  test_data <- df.simple[-train_indices, ]
+  
+  actuals <- test_data$realised
+  
+  
+  
+  #------ Train the full model -------#
+  full.formula <- as.formula(
+    paste("realised ~", paste(paste0("vol", 1:19), collapse = " + "))
+  )
+  full.model <- lm(full.formula, data = train_data)
+  
+  
+  #----- Train the stepwise model -----#
+  step.model <- stepAIC(full.model,
+                     direction = "both",
+                     trace     = FALSE,
+                     k = log(nrow(train_data)))
+  
+  stepwise_models[[ length(stepwise_models) + 1]] <- step.model
+  
+  #----- Compute stepwise QLIKE and test set R squared -----#
+  predictions <- predict(step.model, newdata = test_data)
+  qlike_vals <- (actuals / predictions) - log(actuals / predictions) - 1
+  
+  SSR <- sum((actuals - predictions)^2)
+  SST <- sum((actuals - mean(actuals))^2)
+  
+  R2_test_stepwise <- 1 - SSR/SST
+  
+  
+  # Compute median QLIKE
+  med_qlike <- median(qlike_vals)
+  
+  # Make a list of the features
+  
+  features <- attr(terms(step.model), "term.labels")
+  
+  
+  
+  
+  
+  #---- Train the baseline model -----#
+  original.model <- lm(realised ~ vol19 + vol5 + vol1, train_data)
+  
+  original_models[[ length(original_models) + 1]] <- original.model
+  
+  
+  #----- Compute original QLIKE and test set R squared -----#
+  predictions1 <- predict(original.model, newdata = test_data)
+  qlike_vals1 <- (actuals / predictions1) - log(actuals / predictions1) - 1
+  
+  SSR1 <- sum((actuals - predictions1)^2)
+  
+  R2_test_orig <- 1 - SSR1 / SST
+  
+  features1 <- attr(terms(original.model), "term.labels")
+
+  
+  
+  
+  
+  # Compute median QLIKE
+  med_qlike1 <- median(qlike_vals1)
+      
+  
+  new_row <- data.frame(stock_id = stock_ids[i], 
+                        orig_median_qlike = med_qlike1, orig_test_R2 = R2_test_orig, orig_features = paste(features1, collapse = ", "),
+                        stepwise_median_qlike = med_qlike, stepwise_test_R2 = R2_test_stepwise, stepwise_features = paste(features, collapse = ", "))
+  
+  results <- rbind(results, new_row)
+  print(i)
+}
+
+
+results
+
+write.csv(results, "HAR_RV_Performance_Metrics.csv", row.names = FALSE)
+
+orig_A = 1 / (1 + results$orig_median_qlike)
+
+stepwise_A = 1/ (1 + results$stepwise_median_qlike)
+
+new_results = data.frame(stock_id = stock_ids,
+                         orig_parameter = 0.5*R2_test_orig + 0.5*orig_A,
+                         stepwise_parameter = 0.5*R2_test_stepwise + 0.5*stepwise_A)
+
+head(new_results)
+
+write.csv(new_results, "HAR_RV_S_Scores.csv", row.names = FALSE)
+
+dim(train_data)
+
+dim(test_data)
+
+```
