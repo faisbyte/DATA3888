@@ -5,8 +5,8 @@
 First, clone the repository
 
 ```
-git clone https://github.com/faisbyte/DATA3888
-cd DATA3888
+git clone https://github.com/faisbyte/DATA3888-Optiver13
+cd DATA3888-Optiver13
 ```
 
 Then, make sure you have installed all the packages we have used using the command below in R Studio's Console:
