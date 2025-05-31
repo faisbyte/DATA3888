@@ -1,0 +1,62 @@
+---
+title: "Stock-Model Assignment"
+format: html
+editor: source
+---
+
+```{r}
+light_raw <- read.csv("~/Documents/GitHub/DATA3888/LightGBM Performance Evaluation.csv")
+har <- read.csv("~/Documents/GitHub/DATA3888/HAR_RV_S_Scores.csv")
+gam <- read.csv("~/Documents/GitHub/DATA3888/GAM_S(0.5)scores.csv")
+
+head(light_raw)
+
+alpha <- 0.5
+
+light <- light_raw %>%
+  transmute(
+    Stock,
+    S = alpha * R2 + (1 - alpha) * (1 / (1 + Median_QLIKE))
+  )
+
+light2 <- light %>%  rename(stock = Stock, S_lightgbm = S)
+gam2 <- gam %>%
+  mutate(
+    stock = str_replace(stock, "zero$", "0"),
+    stock = str_replace(stock, "^stock(\\d+)$", "stock_\\1")
+  )
+har2   <- har   %>%  rename(stock = stock_id)
+
+# 2. Join them and rename the S-scores sensibly
+combined_scores <- light2 %>%                 
+  left_join(gam2   %>% rename(S_gam = S_0.5), by = "stock") %>%  # your “gam” model
+  left_join(har2   %>% 
+              rename(
+                S_har_base     = orig_parameter,
+                S_har_stepwise = stepwise_parameter
+              ),
+            by = "stock")
+
+model_names <- c("LightGBM", "GAM", "Baseline HAR-RV", "Stepwise HAR-RV")
+
+# find, for each row, which of columns 2:5 is the max
+best_idx <- max.col(combined_scores[, c("S_lightgbm","S_gam","S_har_base","S_har_stepwise")],
+                    ties.method = "first")
+
+# map to names
+combined_scores$Recommendation <- model_names[best_idx]
+
+# inspect
+names(combined_scores)[1] <- "stock_id"
+
+head(combined_scores)
+
+
+write.csv(
+  combined_scores, 
+  "~/Documents/GitHub/DATA3888/All_model_S_scores.csv",
+  row.names = FALSE
+)
+
+
+```
