@@ -1,5 +1,5 @@
 ---
-title: "stock0_group"
+title: "Generalised Additive Model"
 format: html
 editor: visual
 code-fold: true
